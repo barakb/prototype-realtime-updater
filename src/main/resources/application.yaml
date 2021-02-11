@@ -1,0 +1,49 @@
+server:
+  port: 8080
+management:
+  info:
+    git:
+      mode: full
+  endpoints:
+    web:
+      base-path: "/management"
+      exposure:
+        include: "*"
+spring:
+  application:
+    name: "realtime-updater"
+  output:
+    ansi:
+      enabled: "always"
+  main:
+    banner-mode: "off"
+  devtools:
+    restart:
+      enabled: "true"
+
+settings:
+  kafka:
+    consumer:
+      bootstrap-servers: localhost:9092
+      group-id: realtime-updater
+#      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.IntegerDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      bootstrap-servers: localhost:9092
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.IntegerSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+  batch-size: 10
+  retry-delay: 5
+
+logging:
+  level:
+    root: "info"
+    org.springframework.data.r2dbc: "debug"
+    com.totango: "debug"
+    org.apache.kafka.clients.internals: "warn"
+    org.apache.kafka.clients.producer.ProducerConfig: "warn"
+    org.apache.kafka.clients.consumer.ConsumerConfig: "warn"
+    org.apache.kafka.clients.consumer.internals: "warn"
+    reactor.kafka.receiver.internals: "warn"
