@@ -38,6 +38,10 @@ settings:
   retry-delay: 5
 
 logging:
+  pattern:
+#    http://logback.qos.ch/manual/layouts.html
+#    https://howtodoinjava.com/spring-boot2/logging/configure-logging-application-yml/
+    console: "%date{HH:mm:ss.SSS}  %-5level [%thread] %F:%L - %logger{0} : %msg%n"
   level:
     root: "info"
     org.springframework.data.r2dbc: "debug"

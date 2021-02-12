@@ -18,9 +18,12 @@ import reactor.kafka.receiver.ReceiverOffset
 import reactor.kafka.receiver.ReceiverOptions
 import java.time.Duration
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 @Component
 class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties) {
+
+    val pipelineIdGen = AtomicInteger()
 
     val consumerProps: Map<String, Any> = properties.kafka.consumer.build()
 
@@ -33,14 +36,18 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         Executors.newFixedThreadPool(properties.updaterThreads) { r: Runnable -> Thread(r, "Updater") }
             .asCoroutineDispatcher()
 
-    private val pipelineScope: CoroutineScope =
-        CoroutineScope(Executors.newFixedThreadPool(1) { r: Runnable -> Thread(r, "Pipeline") }
-            .asCoroutineDispatcher())
+    private val pipelineScope: CoroutineScope = CoroutineScope(updatersDispatcher)
+
 
     private val semaphore: Semaphore = Semaphore(properties.inFlightUpdates)
 
     private val mutex = Mutex()
     private var pipelines = listOf<Pair<String, Job>>()
+
+    val timeoutsFlow: Flow<Either.Left<Long>> =
+        Flux.interval(Duration.ofMillis(properties.batchMaxDelay))
+            .asFlow()
+            .map { Either.left(it) }
 
     fun list(): List<String> {
         return pipelines.map {
@@ -48,8 +55,8 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         }
     }
 
-    suspend fun removeService(service: String) {
-        logger.info("removing service $service from pipeline")
+    suspend fun removePipeline(service: String) {
+        logger.info("removing pipeline $service")
         mutex.withLock {
             val found = pipelines.firstOrNull { it.first == service }
             if (found != null) {
@@ -59,101 +66,100 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         }
     }
 
+    suspend fun registerPipeline(serviceId: String, job: Job) {
+        mutex.withLock {
+            pipelines = pipelines + (serviceId to job)
+            logger.info("$serviceId pipeline was added")
+        }
+    }
+
     @FlowPreview
     @ExperimentalCoroutinesApi
     @ObsoleteCoroutinesApi
     suspend fun addService(serviceId: String) {
 
-        val job = pipelineScope.launch {
-            val topic = "topic_$serviceId"
+        val pipelineId = "$serviceId:${pipelineIdGen.incrementAndGet()}"
+
+        val topic = "topic_$serviceId"
+
+        val receiverOptions: ReceiverOptions<Int, String> = ReceiverOptions.create<Int, String>(consumerProps)
+            .subscription(listOf(topic))
+
+        val updater: UpdateBuffer<Payload> = UpdateBuffer(properties.batchSize)
 
 
-            val receiverOptions: ReceiverOptions<Int, String> = ReceiverOptions.create<Int, String>(consumerProps)
-                .subscription(listOf(topic))
+        suspend fun UpdateBuffer<Payload>.flush() {
+            val items = returnAndFlush()
+            if (items != null) batchHandlingAuxFun(pipelineId, items)
+        }
 
-            val updater: UpdateBuffer<Payload> = UpdateBuffer(properties.batchSize)
+        val processor = ReceiverProcessorImpl()
 
-            suspend fun UpdateBuffer<Payload>.flush() {
-                val items = returnAndFlush()
-                if (items != null) batchHandlingAuxFun(items)
-            }
+        val payloadFlow: Flow<Either.Right<Pair<Payload, ReceiverOffset>>> =
+            KafkaReceiver.create(receiverOptions).receive()
+                .asFlow()
+                .flowOn(subscriberDispatcher)
+                .flatMapConcat { record ->
+                    logger.debug("$pipelineId: received kafka record: $record")
+                    // parse from string, process with processor and wrap with right
+                    processor.processIncomingRecord(parse(record.value()))
+                        .asFlow()
+                        .map { Either.right(it to record.receiverOffset()) }
+                }.catch { cause: Throwable ->
+                    logger.error("$pipelineId: failed to process record ", cause)
+                }
 
-            val processor = ReceiverProcessorImpl()
-
-            val payloadFlow: Flow<Either.Right<Pair<Payload, ReceiverOffset>>> =
-                KafkaReceiver.create(receiverOptions).receive()
-                    .asFlow()
-                    .flowOn(subscriberDispatcher)
-                    .flatMapConcat { record ->
-                        // parse from string, process with processor and wrap with right
-                        processor.processIncomingRecord(parse(record.value()))
-                            .asFlow()
-                            .map { Either.right(it to record.receiverOffset()) }
-                    }.catch { cause: Throwable ->
-                        logger.error("failed to process record ", cause)
-                    }
-            val timeoutsFlow: Flow<Either.Left<Long>> =
-                Flux.interval(Duration.ofMillis(properties.batchMaxDelay))
-                    .asFlow()
-                    .map { Either.left(it) }
-
-            val payloadOrTimeout: Flow<Either<Long, Pair<Payload, ReceiverOffset>>> =
-                listOf(payloadFlow, timeoutsFlow)
-                    .merge()
-                    .onEach { item ->
-                        when (item) {
-                            is Either.Left -> updater.flush()
-                            is Either.Right -> {
-                                val (payload: Payload, offset: ReceiverOffset) = item.right
-                                addToBatchUpdateIfExceeds(updater, payload, offset)
-                            }
+        val payloadOrTimeout: Flow<Either<Long, Pair<Payload, ReceiverOffset>>> =
+            listOf(payloadFlow, timeoutsFlow)
+                .merge()
+                .onEach { item ->
+                    when (item) {
+                        is Either.Left -> updater.flush()
+                        is Either.Right -> {
+                            val (payload: Payload, offset: ReceiverOffset) = item.right
+                            addToBatchUpdateIfExceeds(pipelineId, updater, payload, offset)
                         }
-                    }.catch { e: Throwable ->
-                        logger.error("fail to process update", e)
-                    }.flowOn(updatersDispatcher)
+                    }
+                }.catch { e: Throwable ->
+                    logger.error("$pipelineId: fail to process update", e)
+                }.flowOn(updatersDispatcher)
 
-            launch(updatersDispatcher) {
-                payloadOrTimeout.collect()
-            }
-
+        val job = pipelineScope.launch(updatersDispatcher) {
+            payloadOrTimeout.collect()
         }
 
-        mutex.withLock {
-            pipelines = pipelines + (serviceId to job)
-            logger.info("$serviceId was added to pipeline")
-        }
+        registerPipeline(serviceId, job)
     }
 
     private suspend fun addToBatchUpdateIfExceeds(
+        pipelineId: String,
         updater: UpdateBuffer<Payload>,
         item: Payload,
         receiverOffset: ReceiverOffset
     ) {
-        val updateBatch = updater.updateBatch(item, receiverOffset)
+        val updateBatch: List<Payload>? = updater.updateBatch(pipelineId, item, receiverOffset)
         if (updateBatch != null && updateBatch.isNotEmpty()) {
-            batchHandlingAuxFun(updateBatch)
+            batchHandlingAuxFun(pipelineId, updateBatch)
         }
     }
 
-
-    private suspend fun batchHandlingAuxFun(item: List<Payload>) {
+    private suspend fun batchHandlingAuxFun(pipelineId: String, item: List<Payload>) {
         val batchCommander = item[0]
         do {
             semaphore.withPermit {
                 delay(batchCommander.sendDelay * 1000L)
-                logger.info("--> sending $item")
+                logger.info("--> $pipelineId: sending $item")
                 if (batchCommander.retries > 0) {
-                    logger.info("send fail, will retry in ${properties.retryDelay} seconds.")
+                    logger.info("$pipelineId: send fail, will retry in ${properties.retryDelay} seconds.")
                     delay(properties.retryDelay * 1000L)
                 } else {
-                    logger.info("send done.")
+                    logger.info("$pipelineId: send done.")
                 }
             }
             batchCommander.retries--
 
         } while (batchCommander.retries > -1)
     }
-
 
     private inline fun <reified T : Any> parse(value: String): T {
         @Suppress("BlockingMethodInNonBlockingContext")

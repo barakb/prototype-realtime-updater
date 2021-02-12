@@ -20,12 +20,12 @@ class UpdateBuffer<T>(private val threshold: Int) {
         }
     }
 
-    fun updateBatch(record: T, maxReceiverOffset: ReceiverOffset): List<T>? {
+    fun updateBatch(pipelineId: String, record: T, maxReceiverOffset: ReceiverOffset): List<T>? {
 
         batch.add(record)
         receiverOffset = maxReceiverOffset
 
-        logger.info("add record $record to batch ${batch.size}")
+        logger.info("$pipelineId: add record $record to batch ${batch.size}")
 
         return if (batch.size >= threshold) {
             val returnedBatch = batch

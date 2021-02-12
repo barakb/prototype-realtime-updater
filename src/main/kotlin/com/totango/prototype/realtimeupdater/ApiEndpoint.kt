@@ -41,7 +41,7 @@ class ApiEndpoint (private val pipeline: RealtimeUpdaterPipeline, private val pu
     """)
     @DeleteMapping("/pipeline")
     suspend fun removeService(@RequestParam("serviceId", defaultValue = "barak") serviceId: String){
-        pipeline.removeService(serviceId)
+        pipeline.removePipeline(serviceId)
     }
 
     @Operation(summary = "produce messages to a service topic", tags = ["Testing"]
@@ -65,7 +65,6 @@ class ApiEndpoint (private val pipeline: RealtimeUpdaterPipeline, private val pu
         }
         return publisher.publish("topic_$serviceId", messages)
     }
-
 
     companion object {
         @Suppress("unused")
