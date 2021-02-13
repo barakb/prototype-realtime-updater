@@ -35,7 +35,10 @@ settings:
       key-serializer: org.apache.kafka.common.serialization.IntegerSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
   batch-size: 10
-  retry-delay: 5
+  batch-max-delay: 1
+  send-retry-max-delay: 5000
+  send-retries: 3
+
 
 logging:
   pattern:

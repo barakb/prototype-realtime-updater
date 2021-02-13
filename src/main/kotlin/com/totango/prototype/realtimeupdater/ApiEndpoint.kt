@@ -3,9 +3,6 @@ package com.totango.prototype.realtimeupdater
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import io.swagger.v3.oas.annotations.Operation
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.ObsoleteCoroutinesApi
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.annotation.*
@@ -25,9 +22,6 @@ class ApiEndpoint (private val pipeline: RealtimeUpdaterPipeline, private val pu
     @GetMapping("/pipeline/list")
     fun list() = pipeline.list()
 
-    @FlowPreview
-    @ObsoleteCoroutinesApi
-    @ExperimentalCoroutinesApi
     @Operation(summary = "register a pipeline for a service", tags = ["Pipeline"])
     @PostMapping("/pipeline")
     suspend fun registerPipeline(@RequestParam("serviceId", defaultValue = "barak") serviceId: String){
@@ -57,7 +51,7 @@ class ApiEndpoint (private val pipeline: RealtimeUpdaterPipeline, private val pu
     ): Flux<String> {
         logger.info("producing: serviceId = $serviceId, count = $count, retries=$retries")
         val messages = Flux.range(0, count).flatMap {
-            val payload = Payload(retries, 10, "$serviceId $it")
+            val payload = Payload(retries, 1, "$serviceId $it")
             Flux.just(mapper.writeValueAsString(payload)).onErrorResume { e ->
                 logger.error("fail to write payload $payload as string", e)
                 Flux.empty()

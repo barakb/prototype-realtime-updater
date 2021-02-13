@@ -56,18 +56,18 @@ data class Kafka(
     var producer: ProducerProperties = ProducerProperties()
 )
 
+@Suppress("RemoveEmptyPrimaryConstructor")
 @Component
 @ConfigurationProperties("settings")
-data class RealtimeUpdaterProperties(
-    val kafka : Kafka = Kafka(),
-    val batchSize: Int = 10,
-    val batchMaxDelay: Long = 10 * 1000,
-    val batchRetries: Int = 3,
-    val subscriberThreads: Int = 1,
-    val updaterThreads: Int = 5,
-    val inFlightUpdates: Int = 20,
-    val retryDelay: Int = 5,
-)
+class RealtimeUpdaterProperties() {
+    var kafka: Kafka = Kafka()
+    var batchSize: Int = 10
+    var batchMaxDelay: Long = 1
+    var sendRetries: Int = 3
+    var updaterThreads: Int = 5
+    var inFlightUpdates: Int = 20
+    var sendRetryMaxDelay: Long = 5000
+}
 
 
 
