@@ -95,9 +95,9 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         val job = pipelineScope.launch(updatersDispatcher) {
             batchFlux.asFlow().collect { batch: MutableList<Pair<Payload, ReceiverOffset>> ->
                 try {
-                    sendBatch(pipelineId, batch.map { it.first })
+                    sendBatchWithRetries(pipelineId, batch.map { it.first })
                 } catch (e: Exception) {
-                    logger.error("$pipelineId: failed to send batch (${batch.size}) $batch")
+                    logger.error("$pipelineId: no more retries for batch (${batch.size}) $batch")
                 }
                 batch.last().second.commit()
             }
@@ -111,7 +111,7 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         processor: ReceiverProcessor<Payload>,
         batchSize: Int,
         batchMaxDelay: Long,
-    ) =
+    ): Flux<MutableList<Pair<Payload, ReceiverOffset>>> =
         receiveFlux
             .publishOn(updaterScheduler)
             .flatMap(processor.process(pipelineId))
@@ -130,23 +130,39 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         }
 
 
-    private suspend fun sendBatch(pipelineId: String, item: List<Payload>) {
-        val batchCommander = item[0]
-        var requestedFails = batchCommander.retries
+    private suspend fun sendBatchWithRetries(pipelineId: String, item: List<Payload>) {
+        val sendDelay = item[0].sendDelay
+        var requestedFails = item[0].retries
         retry(
             limitAttempts(properties.sendRetries) + fullJitterBackoff(
                 base = 10L,
                 max = properties.sendRetryMaxDelay
             )
         ) {
-            semaphore.withPermit {
-                logger.info("--> $pipelineId: sending (${item.size}) $item")
-                delay(batchCommander.sendDelay * 1000L)
-                if (requestedFails > 0) {
-                    requestedFails--
-                    throw UnknownHostException("fobo bobo")
+            val shouldFail = 0 < requestedFails
+            requestedFails--
+            try {
+                semaphore.withPermit {
+                    sendBatch(pipelineId, item, sendDelay, shouldFail)
                 }
+            }catch(e: Exception){
+                logger.warn("$pipelineId: send batch (${item.size}) failed with exception $e")
+                throw e
             }
+
+        }
+    }
+
+    private suspend fun sendBatch(
+        pipelineId: String,
+        item: List<Payload>,
+        sendDelay: Int,
+        shouldFail: Boolean
+    ) {
+        logger.info("--> $pipelineId: sending (${item.size}) [shouldFail=$shouldFail] $item")
+        delay(sendDelay * 1000L)
+        if (shouldFail) {
+            throw UnknownHostException("should fail")
         }
     }
 
