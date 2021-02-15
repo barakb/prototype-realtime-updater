@@ -1,3 +1,5 @@
+[![Build Status](https://www.travis-ci.com/barakb/prototype-realtime-updater.svg?branch=master)](https://www.travis-ci.com/barakb/prototype-realtime-updater)
+
 # Getting Started
 
 
