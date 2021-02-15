@@ -26,7 +26,8 @@ settings:
     consumer:
       bootstrap-servers: localhost:9092
       group-id: realtime-updater
-#      auto-offset-reset: earliest
+      max-poll-records: 4
+      #      auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.IntegerDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
     producer:
@@ -38,6 +39,8 @@ settings:
   batch-max-delay: 1
   send-retry-max-delay: 5000
   send-retries: 3
+  updater-threads: 5
+  in-flight-updates: 1
 
 
 logging:
@@ -49,8 +52,8 @@ logging:
     root: "info"
     org.springframework.data.r2dbc: "debug"
     com.totango: "debug"
-    org.apache.kafka.clients.internals: "warn"
+#    org.apache.kafka.clients.internals: "warn"
     org.apache.kafka.clients.producer.ProducerConfig: "warn"
-    org.apache.kafka.clients.consumer.ConsumerConfig: "warn"
-    org.apache.kafka.clients.consumer.internals: "warn"
-    reactor.kafka.receiver.internals: "warn"
+#    org.apache.kafka.clients.consumer.ConsumerConfig: "warn"
+#    org.apache.kafka.clients.consumer.internals: "warn"
+#    reactor.kafka.receiver.internals: "warn"

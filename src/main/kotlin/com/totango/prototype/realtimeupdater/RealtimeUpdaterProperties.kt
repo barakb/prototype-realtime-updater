@@ -16,6 +16,7 @@ fun <K,V> MutableMap<K,V>.into(key: K) = { value:V -> this[key] = value}
 class ConsumerProperties(){
     lateinit var bootstrapServers: String
     lateinit var groupId: String
+    var maxPollRecords: Int = 1
     var autoOffsetReset: String? = null
     var keyDeserializer : Class<*> = StringDeserializer::class.java
     var valueDeserializer : Class<*> = StringDeserializer::class.java
@@ -27,6 +28,7 @@ class ConsumerProperties(){
         propertyMapper.from(groupId).to(properties.into(ConsumerConfig.GROUP_ID_CONFIG))
         propertyMapper.from(keyDeserializer).to(properties.into(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG))
         propertyMapper.from(valueDeserializer).to(properties.into(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG))
+        propertyMapper.from(maxPollRecords).to(properties.into(ConsumerConfig.MAX_POLL_RECORDS_CONFIG))
         autoOffsetReset?.let {propertyMapper.from(it).to(properties.into(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG))}
         return properties
     }
@@ -64,8 +66,8 @@ class RealtimeUpdaterProperties() {
     var batchSize: Int = 10
     var batchMaxDelay: Long = 1
     var sendRetries: Int = 3
-    var updaterThreads: Int = 5
-    var inFlightUpdates: Int = 20
+    var updaterThreads: Int = 1
+    var inFlightUpdates: Int = 1
     var sendRetryMaxDelay: Long = 5000
 }
 
