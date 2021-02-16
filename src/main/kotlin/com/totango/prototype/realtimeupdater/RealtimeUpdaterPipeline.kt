@@ -39,10 +39,11 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
 
     private val subscriberScheduler = Schedulers.newSingle("subscriber")
 
-    private val updaterCoroutineScope = CoroutineScope(
-        Executors.newFixedThreadPool(10) { Thread(it, "updater-thread") }.asCoroutineDispatcher()
-                + CoroutineName("updater")
-    )
+    private val updaterCoroutineContext =
+        (Executors.newFixedThreadPool(10) { Thread(it, "updater-thread") }.asCoroutineDispatcher()
+                + CoroutineName("updater"))
+
+    private val updaterCoroutineScope = CoroutineScope(updaterCoroutineContext)
 
     private val semaphore: Semaphore = Semaphore(properties.inFlightUpdates)
 
@@ -81,6 +82,18 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         val topic = "topic_$serviceId"
         val processor = ReceiverProcessorImpl()
 
+        fun process(records: Flux<ReceiverRecord<Int, String>>): Flux<Pair<Payload, ReceiverOffset>> =
+            records.concatMap({ record ->
+                try {
+                    logger.debug("$pipelineId: *received a kafka record*")
+                    processor.processIncomingRecord(parse(record.value())).toFlux()
+                        .map { (it to record.receiverOffset()) }
+                } catch (e: Exception) {
+                    logger.error("$pipelineId: error while parsing record $record", e)
+                    Flux.empty()
+                }
+            }, 1)
+
         val receiverOptions: ReceiverOptions<Int, String> = ReceiverOptions.create<Int, String>(consumerProps)
             .subscription(listOf(topic))
         logger.info("receiverOptions: $receiverOptions")
@@ -89,18 +102,17 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         val receiver = KafkaReceiver.create(receiverOptions)
         val batchFlux = receiver.receive()
             .publishOn(subscriberScheduler)
-            .transform(process(pipelineId, processor))
+            .transform{process(it)}
             .bufferTimeout(properties.batchSize, Duration.ofSeconds(properties.batchMaxDelay))
-            .flatMap(suspended {
-                sendBatch(pipelineId, it)
-            })
-
+            .concatMap(suspendedToMono {
+                sendAndCommit(pipelineId, it)
+            }, 1)
 
         val disposable: Disposable = batchFlux.subscribe()
         registerPipeline(serviceId, disposable)
     }
 
-    private fun <A, B> suspended(block: suspend (A) -> B): (A) -> Mono<B> = { a ->
+    private fun <A, B> suspendedToMono(block: suspend (A) -> B): (A) -> Mono<B> = { a ->
         Mono.create { sink: MonoSink<B> ->
             updaterCoroutineScope.launch {
                 try {
@@ -112,33 +124,20 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         }
     }
 
-    private fun process(pipelineId: String, processor: ReceiverProcessorImpl):
-                (Flux<ReceiverRecord<Int, String>>) -> Flux<Pair<Payload, ReceiverOffset>> =
-        { records: Flux<ReceiverRecord<Int, String>> ->
-            records.flatMap { record ->
-                try {
-                    logger.debug("$pipelineId: *received a kafka record*: $record")
-                    processor.processIncomingRecord(parse(record.value())).toFlux()
-                        .map { (it to record.receiverOffset()) }
-                } catch (e: Exception) {
-                    logger.error("$pipelineId: error while parsing record $record", e)
-                    Flux.empty()
-                }
-            }
-        }
 
-    private suspend fun sendBatch(pipelineId: String, batch: List<Pair<Payload, ReceiverOffset>>) {
+    private suspend fun sendAndCommit(pipelineId: String, batch: List<Pair<Payload, ReceiverOffset>>) {
         try {
-            sendBatchWithRetries(pipelineId, batch.map { it.first })
+            val items = batch.map { it.first }
+            val param = SendBatchParams(pipelineId, items, items[0].sendDelay, items[0].retries)
+            sendBatchWithRetries(param)
         } catch (e: Exception) {
             logger.error("$pipelineId: no more retries for batch (${batch.size}) $batch")
         }
         batch.last().second.commit()
     }
 
-    private suspend fun sendBatchWithRetries(pipelineId: String, item: List<Payload>) {
-        val sendDelay = item[0].sendDelay
-        var requestedFails = item[0].retries
+    private suspend fun sendBatchWithRetries(params: SendBatchParams) {
+        var requestedFails = params.requestedFails
         retry(
             limitAttempts(properties.sendRetries) + fullJitterBackoff(
                 base = 10L,
@@ -149,25 +148,20 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
             requestedFails--
             try {
                 semaphore.withPermit {
-                    sendBatch(pipelineId, item, sendDelay, shouldFail)
+                    justSendBatch(params.copy(shouldFail = shouldFail))
                 }
             } catch (e: Exception) {
-                logger.warn("$pipelineId: send batch (${item.size}) failed with exception $e")
+                logger.warn("${params.pipelineId}: send batch (${params.items.size}) failed with exception $e")
                 throw e
             }
 
         }
     }
 
-    private suspend fun sendBatch(
-        pipelineId: String,
-        item: List<Payload>,
-        sendDelay: Int,
-        shouldFail: Boolean
-    ) {
-        logger.info("--> $pipelineId: sending (${item.size}) [shouldFail=$shouldFail] $item")
-        delay(sendDelay * 1000L)
-        if (shouldFail) {
+    private suspend fun justSendBatch(params: SendBatchParams) {
+        logger.info("--> $params.pipelineId: sending (${params.items.size}) [shouldFail=${params.shouldFail}] ${params.items}")
+        delay(params.sendDelay * 1000L)
+        if (params.shouldFail) {
             throw UnknownHostException("should fail")
         }
     }
@@ -183,3 +177,11 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         val mapper: ObjectMapper = ObjectMapper().registerModule(KotlinModule())
     }
 }
+
+data class SendBatchParams(
+    val pipelineId: String,
+    val items: List<Payload>,
+    val sendDelay: Int,
+    val requestedFails: Int,
+    val shouldFail: Boolean = false
+)
