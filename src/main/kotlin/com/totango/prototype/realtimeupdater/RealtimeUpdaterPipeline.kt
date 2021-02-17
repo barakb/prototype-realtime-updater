@@ -40,7 +40,7 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
     private val subscriberScheduler = Schedulers.newSingle("subscriber")
 
     private val updaterCoroutineContext =
-        (Executors.newFixedThreadPool(10) { Thread(it, "updater-thread") }.asCoroutineDispatcher()
+        (Executors.newFixedThreadPool(1) { Thread(it, "updater-thread") }.asCoroutineDispatcher()
                 + CoroutineName("updater"))
 
     private val updaterCoroutineScope = CoroutineScope(updaterCoroutineContext)
@@ -85,7 +85,7 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
         fun process(records: Flux<ReceiverRecord<Int, String>>): Flux<Pair<Payload, ReceiverOffset>> =
             records.concatMap({ record ->
                 try {
-                    logger.debug("$pipelineId: *received a kafka record*")
+                    logger.debug("<-- $pipelineId: received a kafka record")
                     processor.processIncomingRecord(parse(record.value())).toFlux()
                         .map { (it to record.receiverOffset()) }
                 } catch (e: Exception) {
@@ -104,7 +104,7 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
             .publishOn(subscriberScheduler)
             .transform{process(it)}
             .bufferTimeout(properties.batchSize, Duration.ofSeconds(properties.batchMaxDelay))
-            .concatMap(suspendedToMono {
+            .concatMap (suspendedToMono {
                 sendAndCommit(pipelineId, it)
             }, 1)
 
@@ -126,14 +126,16 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
 
 
     private suspend fun sendAndCommit(pipelineId: String, batch: List<Pair<Payload, ReceiverOffset>>) {
+        val receiverOffset = batch.last().second
         try {
             val items = batch.map { it.first }
             val param = SendBatchParams(pipelineId, items, items[0].sendDelay, items[0].retries)
             sendBatchWithRetries(param)
         } catch (e: Exception) {
-            logger.error("$pipelineId: no more retries for batch (${batch.size}) $batch")
+            logger.error("    $pipelineId: no more retries for batch (${batch.size}) $batch")
         }
-        batch.last().second.commit()
+        logger.info("    $pipelineId: Committing batch (${batch.size}) at ${receiverOffset.offset()}")
+        receiverOffset.commit()
     }
 
     private suspend fun sendBatchWithRetries(params: SendBatchParams) {
@@ -151,7 +153,7 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
                     justSendBatch(params.copy(shouldFail = shouldFail))
                 }
             } catch (e: Exception) {
-                logger.warn("${params.pipelineId}: send batch (${params.items.size}) failed with exception $e")
+                logger.warn("    ${params.pipelineId}: send batch (${params.items.size}) failed with exception $e")
                 throw e
             }
 
@@ -159,10 +161,13 @@ class RealtimeUpdaterPipeline(private val properties: RealtimeUpdaterProperties)
     }
 
     private suspend fun justSendBatch(params: SendBatchParams) {
-        logger.info("--> $params.pipelineId: sending (${params.items.size}) [shouldFail=${params.shouldFail}] ${params.items}")
+        logger.info("--> ${params.pipelineId}: sending batch of size (${params.items.size}) [shouldFail=${params.shouldFail}]")
         delay(params.sendDelay * 1000L)
         if (params.shouldFail) {
+            logger.info("    ${params.pipelineId}: send batch of size (${params.items.size}) failed.")
             throw UnknownHostException("should fail")
+        }else{
+            logger.info("    ${params.pipelineId}: send batch of size (${params.items.size}) succeed.")
         }
     }
 
