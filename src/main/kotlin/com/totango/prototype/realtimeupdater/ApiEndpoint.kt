@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.Operation
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.annotation.*
+import org.springframework.web.reactive.result.view.RedirectView
 import reactor.core.publisher.Flux
 import java.util.*
 import javax.validation.constraints.Min
@@ -13,42 +14,50 @@ import javax.validation.constraints.Min
 @Suppress("unused")
 @RestController
 @RequestMapping("/api")
-class ApiEndpoint (private val pipeline: RealtimeUpdaterPipeline, private val publisher:UpdatesPublisher){
+class ApiEndpoint(
+    private val pipelineManager: RealtimeUpdaterPipelineManager,
+    private val publisher: UpdatesPublisher
+) {
 
-    @Operation(summary = "list the current pipelines in the collection", tags = ["Pipeline"],
-        description =  """
+    @Operation(
+        summary = "list the current pipelines in the collection", tags = ["Pipeline"],
+        description = """
         There can be zero or more pipelines attache to each service.
         The result contains a service name for each pipeline instance in the pipelines collection. 
-    """)
+    """
+    )
     @GetMapping("/pipeline/list")
-    fun list() = pipeline.list()
+    fun list() = pipelineManager.list()
 
     @Operation(summary = "register a pipeline for a service", tags = ["Pipeline"])
     @PostMapping("/pipeline")
-    suspend fun registerPipeline(@RequestParam("serviceId", defaultValue = "barak") serviceId: String){
-        pipeline.addService(serviceId)
+    suspend fun registerPipeline(@RequestParam("serviceId", defaultValue = "barak") serviceId: String) {
+        pipelineManager.createPipeline(serviceId)
     }
 
-    @Operation(summary = "remove a pipeline for a service", tags = ["Pipeline"],
-    description =  """
+    @Operation(
+        summary = "remove a pipeline for a service", tags = ["Pipeline"],
+        description = """
         Remove a pipeline of this service from the pipelines collection, if no such exists ignore silently.
         This method always succeed, to see the status of pipelines collections use "pipelines/list" 
-    """)
+    """
+    )
     @DeleteMapping("/pipeline")
-    suspend fun removeService(@RequestParam("serviceId", defaultValue = "barak") serviceId: String){
-        pipeline.removePipeline(serviceId)
+    suspend fun removeService(@RequestParam("serviceId", defaultValue = "barak") serviceId: String) {
+        pipelineManager.removePipeline(serviceId)
     }
 
-    @Operation(summary = "produce messages to a service topic", tags = ["Testing"]
-    ,description = """
+    @Operation(
+        summary = "produce messages to a service topic", tags = ["Testing"], description = """
        Will produce to the service topic a sequence of 'count' messages of type Payload
        with the provided retry
-    """)
+    """
+    )
     @PostMapping("/produce")
     fun produce(
-        @RequestParam(name="serviceId", defaultValue = "barak") serviceId: String,
-        @RequestParam(name="count", defaultValue="1") @Min(1) count: Int,
-        @RequestParam(name="retries", defaultValue="0") @Min(0) retries: Int
+        @RequestParam(name = "serviceId", defaultValue = "barak") serviceId: String,
+        @RequestParam(name = "count", defaultValue = "1") @Min(1) count: Int,
+        @RequestParam(name = "retries", defaultValue = "0") @Min(0) retries: Int
     ): Flux<String> {
         logger.info("producing: serviceId = $serviceId, count = $count, retries=$retries")
         val messages = Flux.range(0, count).flatMap {
