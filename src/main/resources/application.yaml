@@ -35,7 +35,7 @@ settings:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.IntegerSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
-  batch-size: 10
+  batch-size: 1000
   batch-max-delay: 1
   send-retry-max-delay: 5000
   send-retries: 3
@@ -52,8 +52,8 @@ logging:
     root: "info"
     org.springframework.data.r2dbc: "debug"
     com.totango: "debug"
-#    org.apache.kafka.clients.internals: "warn"
+    org.apache.kafka.clients.internals: "warn"
     org.apache.kafka.clients.producer.ProducerConfig: "warn"
-#    org.apache.kafka.clients.consumer.ConsumerConfig: "warn"
-#    org.apache.kafka.clients.consumer.internals: "warn"
-#    reactor.kafka.receiver.internals: "warn"
+    org.apache.kafka.clients.consumer.ConsumerConfig: "warn"
+    org.apache.kafka.clients.consumer.internals: "warn"
+    reactor.kafka.receiver.internals: "warn"

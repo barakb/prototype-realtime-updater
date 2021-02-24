@@ -6,8 +6,8 @@ import io.swagger.v3.oas.annotations.Operation
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.annotation.*
-import org.springframework.web.reactive.result.view.RedirectView
 import reactor.core.publisher.Flux
+import reactor.core.publisher.Mono
 import java.util.*
 import javax.validation.constraints.Min
 
@@ -58,16 +58,16 @@ class ApiEndpoint(
         @RequestParam(name = "serviceId", defaultValue = "barak") serviceId: String,
         @RequestParam(name = "count", defaultValue = "1") @Min(1) count: Int,
         @RequestParam(name = "retries", defaultValue = "0") @Min(0) retries: Int
-    ): Flux<String> {
+    ): Mono<Long> {
         logger.info("producing: serviceId = $serviceId, count = $count, retries=$retries")
         val messages = Flux.range(0, count).flatMap {
-            val payload = Payload(UUID.randomUUID().toString(), retries, 1, "$serviceId $it")
+            val payload = Payload(UUID.randomUUID().toString(), retries, 0, "$serviceId $it")
             Flux.just(mapper.writeValueAsString(payload)).onErrorResume { e ->
                 logger.error("fail to write payload $payload as string", e)
                 Flux.empty()
             }
         }
-        return publisher.publish("topic_$serviceId", messages)
+        return publisher.publish(serviceId, messages).count()
     }
 
     companion object {

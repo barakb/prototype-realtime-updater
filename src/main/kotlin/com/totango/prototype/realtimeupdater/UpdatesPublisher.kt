@@ -23,7 +23,8 @@ class UpdatesPublisher(properties: RealtimeUpdaterProperties) : Closeable {
     private val sender: KafkaSender<Int, String> = KafkaSender.create(senderOptions)
 
 
-    fun publish(topic: String, messages: Flux<String>): Flux<String> {
+    fun publish(service: String, messages: Flux<String>): Flux<String> {
+        val topic = RealtimeUpdaterPipelineManager.processorTopic(service)
         val records = messages.map {
             SenderRecord.create(ProducerRecord(topic, 1, it), it)
         }

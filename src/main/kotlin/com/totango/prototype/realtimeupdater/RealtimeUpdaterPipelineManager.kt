@@ -3,8 +3,9 @@ package com.totango.prototype.realtimeupdater
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -20,7 +21,9 @@ class RealtimeUpdaterPipelineManager(private val properties: RealtimeUpdaterProp
 
     private val consumerProps: Map<String, Any> = properties.kafka.consumer.build()
 
-    private val subscriberScheduler = Schedulers.newSingle("subscriber")
+    private val subscriberScheduler = Schedulers.fromExecutorService(Executors.newFixedThreadPool(2) {
+        Thread(it, "subscriber")
+    }, "subscriber")
 
     private val updaterCoroutineContext =
         (Executors.newFixedThreadPool(1) { Thread(it, "updater-thread") }.asCoroutineDispatcher()
@@ -28,10 +31,24 @@ class RealtimeUpdaterPipelineManager(private val properties: RealtimeUpdaterProp
 
     private val updaterCoroutineScope = CoroutineScope(updaterCoroutineContext)
 
-    private val semaphore: Semaphore = Semaphore(properties.inFlightUpdates)
-
+    private val sendChannel = Channel<suspend () -> Unit>()
     private val mutex = Mutex()
     private var pipelines = listOf<Pair<String, Disposable>>()
+
+
+    init {
+        repeat(properties.inFlightUpdates) {
+            updaterCoroutineScope.launch {
+                for (action in sendChannel) {
+                    try {
+                        action()
+                    } catch (e: Exception) {
+                        logger.error("Error while executing action", e)
+                    }
+                }
+            }
+        }
+    }
 
     fun list(): List<String> {
         return pipelines.map {
@@ -61,7 +78,7 @@ class RealtimeUpdaterPipelineManager(private val properties: RealtimeUpdaterProp
                 subscriberScheduler,
                 updaterCoroutineScope,
                 properties,
-                semaphore
+                sendChannel
             )
         val disposable: Disposable = pipeline.activate()
         registerPipeline(serviceId, disposable)
@@ -77,5 +94,7 @@ class RealtimeUpdaterPipelineManager(private val properties: RealtimeUpdaterProp
     companion object {
         @Suppress("unused")
         val logger: Logger = LoggerFactory.getLogger(RealtimeUpdaterPipelineManager::class.java)
+        fun processorTopic(serviceId: String): String = "topic_processor_$serviceId"
+        fun updaterTopic(serviceId: String): String = "topic_updater_$serviceId"
     }
 }

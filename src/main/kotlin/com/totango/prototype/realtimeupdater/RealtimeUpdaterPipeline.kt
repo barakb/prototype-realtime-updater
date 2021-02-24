@@ -6,94 +6,109 @@ import com.github.michaelbull.retry.policy.fullJitterBackoff
 import com.github.michaelbull.retry.policy.limitAttempts
 import com.github.michaelbull.retry.policy.plus
 import com.github.michaelbull.retry.retry
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import org.apache.kafka.clients.producer.ProducerRecord
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import reactor.core.Disposable
+import reactor.core.Disposables
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
-import reactor.core.publisher.MonoSink
 import reactor.core.scheduler.Scheduler
 import reactor.kafka.receiver.KafkaReceiver
 import reactor.kafka.receiver.ReceiverOffset
 import reactor.kafka.receiver.ReceiverOptions
 import reactor.kafka.receiver.ReceiverRecord
+import reactor.kafka.sender.KafkaSender
+import reactor.kafka.sender.SenderOptions
+import reactor.kafka.sender.SenderRecord
 import reactor.kotlin.core.publisher.toFlux
 import java.net.UnknownHostException
 import java.time.Duration
+import java.util.concurrent.atomic.AtomicLong
 
 
 class RealtimeUpdaterPipeline(
     serviceId: String,
     private val pipelineId: String,
-    consumerProps: Map<String, Any>,
+    private val consumerProps: Map<String, Any>,
     subscriberScheduler: Scheduler,
     private val updaterCoroutineScope: CoroutineScope,
     private val properties: RealtimeUpdaterProperties,
-    private val semaphore: Semaphore
+    private val sendChannel: Channel<suspend () -> Unit>
 ) {
-
-    private val receiverOptions: ReceiverOptions<Int, String> = ReceiverOptions.create<Int, String>(consumerProps)
-        .subscription(listOf("topic_$serviceId"))
-
-    private val receiver: KafkaReceiver<Int, String> = KafkaReceiver.create(receiverOptions)
 
     private val processor = ReceiverProcessorImpl()
 
-    private val batchFlux = receiver.receive()
+    private val processorTopic = RealtimeUpdaterPipelineManager.processorTopic(serviceId)
+    private val updaterTopic = RealtimeUpdaterPipelineManager.updaterTopic(serviceId)
+
+    private val sender: KafkaSender<String, String> =
+        KafkaSender.create(SenderOptions.create(properties.kafka.producer.build()))
+
+
+    private fun <K, V> receivedFrom(topic: String): Flux<ReceiverRecord<K, V>> {
+        val options = ReceiverOptions.create<K, V>(consumerProps)
+            .subscription(listOf(topic))
+        return KafkaReceiver.create(options).receive()
+    }
+
+    private val processorFlux = receivedFrom<String, String>(processorTopic)
         .publishOn(subscriberScheduler)
-        .transform { process(it) }
-        .bufferTimeout(properties.batchSize, Duration.ofSeconds(properties.batchMaxDelay))
-
-        .concatMap(suspendedToMono {
-            sendAndCommit(it)
-        }, 1)
-
-    private fun process(records: Flux<ReceiverRecord<Int, String>>): Flux<Pair<Payload, ReceiverOffset>> =
-        records.concatMap({ record ->
-            try {
-                logger.debug("<-- $pipelineId: received a kafka record")
-                processor.processIncomingRecord(mapper.fromString(record.value())).toFlux()
-                    .map { (it to record.receiverOffset()) }
-            } catch (e: Exception) {
-                logger.error("$pipelineId: error while parsing record $record", e)
-                Flux.empty()
+        .concatMap({ record ->
+            val processed = processor.processIncomingRecord(mapper.fromString(record.value())) //todo handle bad input
+//            logger.info("<-- $pipelineId: [P] processed one record from '$processorTopic' yield ${processed.size} records")
+            val records = processed.toFlux()
+                .map(mapper::writeValueAsString) //todo handle bad input
+                .map { SenderRecord.create(ProducerRecord(updaterTopic, record.key(), it), it) }
+            sender.send(records).doOnComplete {
+//                logger.info("--> $pipelineId: [P] committing ${processed.size} records to '$updaterTopic'")
+                record.receiverOffset().commit()
             }
         }, 1)
 
+
+    private val updaterFlux = receivedFrom<String, String>(updaterTopic)
+        .publishOn(subscriberScheduler)
+//        .doOnNext { logger.info("<-- $pipelineId: [U] read one record from '$updaterTopic'") }
+        .map { record -> (mapper.fromString<Payload>(record.value()) to record.receiverOffset()) }
+        .bufferTimeout(properties.batchSize, Duration.ofSeconds(properties.batchMaxDelay))
+        .map { Batch(it) }
+        .doOnNext { logger.info("    $pipelineId: [U] collect to $it") }
+        .concatMap(this::sendBatchAsMono, 1)
 
     fun activate(): Disposable {
-        return batchFlux.subscribe()
+        return Disposables.composite(processorFlux.subscribe(), updaterFlux.subscribe())
     }
 
-    private fun <A, B> suspendedToMono(block: suspend (A) -> B): (A) -> Mono<B> = { a ->
-        Mono.create { sink: MonoSink<B> ->
-            updaterCoroutineScope.launch {
-                try {
-                    sink.success(block(a))
-                } catch (e: Exception) {
-                    sink.error(e)
+    private fun sendBatchAsMono(batch: Batch) = Mono.create<Unit> { sink ->
+        val done: CompletableDeferred<Unit> = CompletableDeferred()
+        updaterCoroutineScope.launch {
+            try {
+                sendChannel.send {
+                    sendAndCommit(batch, done)
                 }
+                sink.success(done.await())
+            } catch (e: Exception) {
+                logger.error("unexpected error $e while sending $batch", e)
+                sink.success(Unit)
             }
         }
     }
 
-
-    private suspend fun sendAndCommit(batch: List<Pair<Payload, ReceiverOffset>>) {
-        val receiverOffset = batch.last().second
+    private suspend fun sendAndCommit(batch: Batch, done: CompletableDeferred<Unit>) {
         try {
-            val items = batch.map { it.first }
-            val param = Batch(items, items[0].sendDelay, items[0].retries)
-            sendBatchWithRetries(param)
+            sendBatchWithRetries(batch)
         } catch (e: Exception) {
-            logger.error("    $pipelineId: no more retries for batch (${batch.size}) $batch")
+            logger.error("    $pipelineId: [U] no more retries for $batch")
         }
-        logger.info("    $pipelineId: Committing batch (${batch.size}) at ${receiverOffset.offset()}")
-        receiverOffset.commit()
+        logger.info("    $pipelineId: [U] Committing $batch")
+        batch.commit()
+        done.complete(Unit)
     }
 
     private suspend fun sendBatchWithRetries(batch: Batch) {
@@ -107,11 +122,9 @@ class RealtimeUpdaterPipeline(
             val shouldFail = 0 < requestedFails
             requestedFails--
             try {
-                semaphore.withPermit {
-                    justSendBatch(batch.copy(shouldFail = shouldFail))
-                }
+                justSendBatch(batch.copy(shouldFail = shouldFail))
             } catch (e: Exception) {
-                logger.warn("    $pipelineId: send batch (${batch.size}) failed with exception $e")
+                logger.warn("    $pipelineId: [U] sending of $batch failed with exception $e")
                 throw e
             }
 
@@ -119,18 +132,20 @@ class RealtimeUpdaterPipeline(
     }
 
     private suspend fun justSendBatch(batch: Batch) {
-        logger.info("--> $pipelineId: sending batch of size (${batch.size}) [shouldFail=${batch.shouldFail}]")
-        delay(batch.sendDelay * 1000L)
+        logger.info("--> $pipelineId: [U] sending $batch [shouldFail=${batch.shouldFail}]")
+        if (0 < batch.sendDelay) {
+            delay(batch.sendDelay.toLong())
+        }
         if (batch.shouldFail) {
-            logger.info("    $pipelineId: send batch of size (${batch.size}) failed.")
+            logger.info("    $pipelineId: [U] send $batch failed.")
             throw UnknownHostException("should fail")
         } else {
-            logger.info("    $pipelineId: send batch of size (${batch.size}) succeed.")
+            logger.info("    $pipelineId: [U] send $batch succeed.")
         }
     }
 
 
-    private inline fun <reified  T: Any> ObjectMapper.fromString(value: String): T{
+    private inline fun <reified T : Any> ObjectMapper.fromString(value: String): T {
         @Suppress("BlockingMethodInNonBlockingContext")
         return this.readValue(value, T::class.java)
     }
@@ -142,9 +157,17 @@ class RealtimeUpdaterPipeline(
     }
 }
 
+val batchId = AtomicLong()
+
 data class Batch(
-    private val items: List<Payload>,
-    val sendDelay: Int,
-    val requestedFails: Int,
+    private val items: List<Pair<Payload, ReceiverOffset>>,
     val shouldFail: Boolean = false
-) : List<Payload> by items
+) : List<Payload> by (items.map { it.first }) {
+    private val id = batchId.getAndIncrement()
+    val sendDelay = this[0].sendDelay
+    val requestedFails = this[0].retries
+
+    fun commit(): Mono<Void> = items.last().second.commit()
+
+    override fun toString(): String = "Batch $id size=${items.size}"
+}

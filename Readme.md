@@ -8,6 +8,11 @@ The configuration file is `application.yaml` in the resource directory.
 All configuration is done using spring-boot convention so environment variables, system properties can be used to override the configuration.
 Logs are configured as well from the same configuration file.
 
+### Kafka topics
+Create 2 kafka topic for each service with the names
+`"topic_processor_$serviceId"`
+`"topic_updater_$serviceId"`
+
 ### Running/Debugging
 `mvn spring-boot:run`
 To debug you will only to define a maven runner with the same maven command in the idea.
@@ -19,3 +24,9 @@ The API is used to trigger actions like adding/removing service, list active pip
 ### Management
 http://localhost:8080/management
 
+
+
+### TODO
+- Handle bad inputs
+- dynamic change the in-flights parameter
+- cleanup
